@@ -48,11 +48,14 @@ func (c Config) Validate() error {
 		return fmt.Errorf("gns: root %q must match ^[a-z][a-z0-9_-]*$", c.Root)
 	}
 	for label, value := range map[string]string{
-		"cache": c.Cache, "flyway": c.Flyway, "cluster": c.Cluster, "timeSeries": c.TimeSeries,
+		"cache": c.Cache, "cluster": c.Cluster, "timeSeries": c.TimeSeries,
 	} {
 		if !nameRE.MatchString(value) {
 			return fmt.Errorf("gns: %s %q must match ^[a-z][a-z0-9_-]*$", label, value)
 		}
+	}
+	if c.Flyway != "none" && !nameRE.MatchString(c.Flyway) {
+		return fmt.Errorf("gns: flyway %q must match ^[a-z][a-z0-9_-]*$ or be \"none\"", c.Flyway)
 	}
 	if c.CosID != "none" && !nameRE.MatchString(c.CosID) {
 		return fmt.Errorf("gns: cosid %q must match ^[a-z][a-z0-9_-]*$ or be \"none\"", c.CosID)
@@ -95,14 +98,28 @@ func Default() Set {
 // CacheName is the namespace passed to gcache.
 func (s Set) CacheName() string { return s.Cache }
 
-// FlywayName is the prefix of migration history tables.
+// FlywayName is the prefix of migration history tables; "none" means no
+// prefix.
 func (s Set) FlywayName() string { return s.Flyway }
 
-// FlywayTable renders the migration history table for base.
-func (s Set) FlywayTable(base string) string { return s.Flyway + "_" + sanitize(base) }
+// FlywayTable renders the migration history table for base. "flyway: none"
+// keeps the base name verbatim (e.g. an existing Flyway table).
+func (s Set) FlywayTable(base string) string {
+	base = sanitize(base)
+	if s.Flyway == "none" {
+		return base
+	}
+	return s.Flyway + "_" + base
+}
 
-// CosIDName is the segment prefix; "none" keeps logical names.
-func (s Set) CosIDName() string { return s.CosID }
+// CosIDName is the CosID allocator namespace. "cosid: none" returns the empty
+// string so an allocator keeps the logical segment names it already has.
+func (s Set) CosIDName() string {
+	if s.CosID == "none" {
+		return ""
+	}
+	return s.CosID
+}
 
 // ClusterName is the cluster/gossip namespace.
 func (s Set) ClusterName() string { return s.Cluster }
@@ -110,9 +127,10 @@ func (s Set) ClusterName() string { return s.Cluster }
 // TimeSeriesName is the time-series table prefix.
 func (s Set) TimeSeriesName() string { return s.TimeSeries }
 
-// Segment renders a CosID segment name. "none" keeps the logical name so a
-// deployment that predates namespacing keeps its existing ID ranges.
-func (s Set) Segment(logical string) string {
+// SegmentKey renders the fully-qualified CosID key (namespace + "." + logical).
+// It is not the argument to gcosid.NewSegmentGenerator when the allocator has a
+// namespace: pass the logical name there and CosIDName to the allocator.
+func (s Set) SegmentKey(logical string) string {
 	if s.CosID == "none" || logical == "" {
 		return logical
 	}

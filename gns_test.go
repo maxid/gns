@@ -10,8 +10,8 @@ func TestDerivedNamespaces(t *testing.T) {
 	if set.CacheName() != "app" || set.FlywayTable("schema_migrations") != "app_schema_migrations" {
 		t.Fatalf("set = %+v", set)
 	}
-	if set.Segment("sys_dict") != "app.sys_dict" {
-		t.Fatalf("segment = %q", set.Segment("sys_dict"))
+	if set.CosIDName() != "app" || set.SegmentKey("sys_dict") != "app.sys_dict" {
+		t.Fatalf("cosid = %q/%q", set.CosIDName(), set.SegmentKey("sys_dict"))
 	}
 	if set.RedisKey("user", "1") != "app:user:1" {
 		t.Fatalf("key = %q", set.RedisKey("user", "1"))
@@ -32,8 +32,8 @@ func TestOverridesAndNone(t *testing.T) {
 	if set.CacheName() != "app_cache" || set.FlywayTable("schema_migrations") != "app_db_schema_migrations" {
 		t.Fatalf("set = %+v", set)
 	}
-	if set.Segment("sys_dict") != "sys_dict" {
-		t.Fatalf("cosid none = %q", set.Segment("sys_dict"))
+	if set.CosIDName() != "" || set.SegmentKey("sys_dict") != "sys_dict" {
+		t.Fatalf("cosid none = %q/%q", set.CosIDName(), set.SegmentKey("sys_dict"))
 	}
 	if set.ClusterName() != "app_cluster" {
 		t.Fatalf("cluster = %q", set.ClusterName())
@@ -45,6 +45,7 @@ func TestValidationAndJoin(t *testing.T) {
 		{Root: "Bad Root"},
 		{Root: "app", Cache: "has space"},
 		{Root: "app", CosID: "bad.dot"},
+		{Root: "app", Flyway: "bad.dot"},
 	} {
 		if err := cfg.Validate(); err == nil {
 			t.Fatalf("expected error for %+v", cfg)
@@ -52,6 +53,13 @@ func TestValidationAndJoin(t *testing.T) {
 	}
 	if _, err := New(Config{Root: ""}); err != nil {
 		t.Fatal(err)
+	}
+	flywayNone, err := New(Config{Root: "app", Flyway: "none"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := flywayNone.FlywayTable("flyway_schema_history"); got != "flyway_schema_history" {
+		t.Fatalf("flyway none = %q", got)
 	}
 	if got := Join(":", "a", "", "b", "c:"); got != "a:b:c" {
 		t.Fatalf("join = %q", got)

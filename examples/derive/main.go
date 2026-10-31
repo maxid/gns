@@ -13,7 +13,7 @@ func main() {
 	}
 	fmt.Println("cache:", set.CacheName())
 	fmt.Println("flyway:", set.FlywayTable("schema_migrations"))
-	fmt.Println("cosid:", set.Segment("sys_dict"))
+	fmt.Println("cosid:", set.CosIDName(), set.SegmentKey("sys_dict"))
 	fmt.Println("cluster:", set.ClusterName())
 	fmt.Println("topic:", set.Topic("iothub_raw"))
 	fmt.Println("redis:", set.RedisKey("token", "abc"))

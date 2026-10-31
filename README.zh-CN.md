@@ -18,6 +18,7 @@ namespace:
   cache: app
   flyway: app
   cosid: none       # 保留既有 CosID 表的逻辑段名
+  # flyway: none    # 保留既有 Flyway 表名（如 flyway_schema_history）
   cluster: app
   timeSeries: app
 ```
@@ -26,12 +27,17 @@ namespace:
 set, _ := gns.New(cfg)
 set.RedisKey("token", "abc")          // app:token:abc
 set.FlywayTable("schema_migrations")  // app_schema_migrations
-set.Segment("sys_dict")               // cosid: none 时仍是 sys_dict
+set.CosIDName()                       // cosid: none 时为空串（传给 allocator）
+set.SegmentKey("sys_dict")            // cosid: none 时仍是 sys_dict
 set.Topic("iothub_raw")               // app.iothub_raw
 ```
 
 子系统为空时继承 `root`。名称只允许小写字母、数字、`_`、`-`；
-`cosid: none` 是保留历史段名的显式逃生口。
+`cosid: none` 是保留历史段名的显式逃生口，`flyway: none` 保留既有历史表名而不加前缀。
+
+`CosIDName()` 是 allocator 的命名空间；`SegmentKey()` 是完整 key。
+不要让 allocator 已经有命名空间时把 `SegmentKey()` 传给 `NewSegmentGenerator`，
+否则前缀会叠加两次。
 
 ## 安装
 

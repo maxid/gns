@@ -20,6 +20,7 @@ namespace:
   cache: app
   flyway: app
   cosid: none       # keep logical segment names for an existing CosID table
+  # flyway: none    # keep an existing Flyway table name (e.g. flyway_schema_history)
   cluster: app
   timeSeries: app
 ```
@@ -28,12 +29,18 @@ namespace:
 set, _ := gns.New(cfg)
 set.RedisKey("token", "abc")          // app:token:abc
 set.FlywayTable("schema_migrations")  // app_schema_migrations
-set.Segment("sys_dict")               // sys_dict when cosid: none
+set.CosIDName()                       // "" when cosid: none (pass to the allocator)
+set.SegmentKey("sys_dict")            // sys_dict when cosid: none
 set.Topic("iothub_raw")               // app.iothub_raw
 ```
 
 Empty subsystem values inherit `root`. Names are lowercase letters, digits,
-`_` and `-`; `cosid: none` is the explicit escape for legacy segment names.
+`_` and `-`. `cosid: none` is the explicit escape for legacy segment names, and
+`flyway: none` keeps an existing history table name without a prefix.
+
+`CosIDName()` is the allocator namespace; `SegmentKey()` is the fully-qualified
+key. Do not pass `SegmentKey()` to `NewSegmentGenerator` when the allocator
+already has a namespace, or the prefix is applied twice.
 
 ## Install
 
