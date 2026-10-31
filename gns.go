@@ -105,8 +105,6 @@ type Store interface {
 	Save(ctx context.Context, ns Namespace) error
 	// Delete removes a namespace; deleting a missing name is not an error.
 	Delete(ctx context.Context, name string) error
-	// List returns all namespaces ordered by name.
-	List(ctx context.Context) ([]Namespace, error)
 }
 
 // MemoryStore is the in-process Store implementation. A zero value is ready to

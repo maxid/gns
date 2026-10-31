@@ -39,7 +39,6 @@ type Store interface {
     Load(ctx context.Context, name string) (Namespace, error)
     Save(ctx context.Context, ns Namespace) error
     Delete(ctx context.Context, name string) error
-    List(ctx context.Context) ([]Namespace, error)
 }
 ```
 
