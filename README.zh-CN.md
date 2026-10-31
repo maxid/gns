@@ -2,42 +2,62 @@
 
 # gns
 
-一个根命名空间，派生出所有写共享状态的子系统所需的前缀：缓存键、迁移历史表、
-CosID 号段、Kafka topic/group 和集群 channel。
+把 namespace 当作基础设施原语：校验后的 namespace 值、context 传递，以及可插拔的
+分布式定义存储。
 
 > 状态：**实验性脚手架**（v0.0.0-dev）。API 尚不稳定。
 
-## 为什么
+## 边界
 
-两个部署共用 Redis、Kafka 或数据库时不能互相覆盖；迁移时又必须保留既有名称。
-`gns` 用一个根命名空间，并允许每个子系统覆盖：
+`gns` 只做三件事：
 
-```yaml
-namespace:
-  root: app
-  cache: app
-  flyway: app
-  cosid: none       # 保留既有 CosID 表的逻辑段名
-  # flyway: none    # 保留既有 Flyway 表名（如 flyway_schema_history）
-  cluster: app
-  timeSeries: app
-```
+- **Namespace**：名称 + 应用自定义 labels；
+- **Context**：`With` / `From` / `MustFrom`；
+- **Store**：持久化 namespace 定义的 SPI，自带内存实现；Redis 等后端由应用或框架
+  （例如通过 `gcache`）实现，gns 不依赖 Redis。
+
+它**不**派生 cache key、Flyway 表名、CosID 段名、Kafka topic 或 cluster channel。
+这些命名约定属于拥有该子系统的库，或应用自己的配置。
+
+## Context
 
 ```go
-set, _ := gns.New(cfg)
-set.RedisKey("token", "abc")          // app:token:abc
-set.FlywayTable("schema_migrations")  // app_schema_migrations
-set.CosIDName()                       // cosid: none 时为空串（传给 allocator）
-set.SegmentKey("sys_dict")            // cosid: none 时仍是 sys_dict
-set.Topic("iothub_raw")               // app.iothub_raw
+ns, _ := gns.New("app-dev")
+ctx := gns.With(context.Background(), ns)
+
+current, ok := gns.From(ctx)   // ok == true
+name := current.Name           // app-dev
 ```
 
-子系统为空时继承 `root`。名称只允许小写字母、数字、`_`、`-`；
-`cosid: none` 是保留历史段名的显式逃生口，`flyway: none` 保留既有历史表名而不加前缀。
+零值 namespace 不是有效作用域：`With` 不会修改 context，`From` 返回
+`ok == false`。gns 不提供隐式默认 namespace。
 
-`CosIDName()` 是 allocator 的命名空间；`SegmentKey()` 是完整 key。
-不要让 allocator 已经有命名空间时把 `SegmentKey()` 传给 `NewSegmentGenerator`，
-否则前缀会叠加两次。
+## Store SPI
+
+```go
+type Store interface {
+    Load(ctx context.Context, name string) (Namespace, error)
+    Save(ctx context.Context, ns Namespace) error
+    Delete(ctx context.Context, name string) error
+    List(ctx context.Context) ([]Namespace, error)
+}
+```
+
+`gns.NewMemoryStore()` 是进程内实现。分布式部署实现同一接口即可（推荐用
+gable/gcache 适配 Redis），后端与配置项由应用决定。
+
+```go
+store := gns.NewMemoryStore()
+_ = store.Save(ctx, gns.Namespace{
+    Name:   "app-dev",
+    Labels: map[string]string{"env": "dev"},
+})
+
+manager, _ := gns.NewManager(store)
+ctx, err := manager.Bind(ctx, "app-dev") // 不存在就是错误，不回落
+```
+
+`Manager.Bind` fail closed：不会用空 namespace 或默认值替代。
 
 ## 安装
 
@@ -48,7 +68,7 @@ go get github.com/maxid/gns
 ## 示例
 
 ```bash
-go run ./examples/derive
+go run ./examples/context
 ```
 
 ## 许可证

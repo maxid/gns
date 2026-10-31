@@ -1,191 +1,201 @@
 package gns
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"regexp"
+	"sort"
 	"strings"
+	"sync"
 )
 
-// Config is the namespace configuration. Empty subsystem values inherit Root.
-type Config struct {
-	Root       string `yaml:"root" json:"root"`
-	Cache      string `yaml:"cache,omitempty" json:"cache,omitempty"`
-	Flyway     string `yaml:"flyway,omitempty" json:"flyway,omitempty"`
-	CosID      string `yaml:"cosid,omitempty" json:"cosid,omitempty"` // "none" keeps logical segment names
-	Cluster    string `yaml:"cluster,omitempty" json:"cluster,omitempty"`
-	TimeSeries string `yaml:"timeSeries,omitempty" json:"timeSeries,omitempty"`
+// Errors returned by gns.
+var (
+	ErrInvalidNamespace = errors.New("gns: invalid namespace")
+	ErrNotFound         = errors.New("gns: namespace not found")
+)
+
+var nameRE = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+// Namespace is a deployment or application namespace. Labels are application
+// defined metadata; gns never interprets them.
+type Namespace struct {
+	Name   string            `json:"name" yaml:"name"`
+	Labels map[string]string `json:"labels,omitempty" yaml:"labels,omitempty"`
 }
 
-// DefaultConfig returns a configuration rooted at root.
-func DefaultConfig(root string) Config {
-	if strings.TrimSpace(root) == "" {
-		root = "gable"
+// New validates name and returns a namespace without labels.
+func New(name string) (Namespace, error) {
+	ns := Namespace{Name: strings.TrimSpace(name)}
+	if err := ns.Validate(); err != nil {
+		return Namespace{}, err
 	}
-	return Config{Root: root}
+	return ns, nil
 }
 
-var nameRE = regexp.MustCompile(`^[a-z][a-z0-9_-]*$`)
-
-// Normalize fills empty subsystem values from Root.
-func (c Config) Normalize() Config {
-	if strings.TrimSpace(c.Root) == "" {
-		c.Root = "gable"
-	}
-	c.Root = strings.TrimSpace(c.Root)
-	for _, target := range []*string{&c.Cache, &c.Flyway, &c.CosID, &c.Cluster, &c.TimeSeries} {
-		*target = strings.TrimSpace(*target)
-		if *target == "" {
-			*target = c.Root
-		}
-	}
-	return c
-}
-
-// Validate checks every namespace that becomes part of a key or table name.
-func (c Config) Validate() error {
-	c = c.Normalize()
-	if !nameRE.MatchString(c.Root) {
-		return fmt.Errorf("gns: root %q must match ^[a-z][a-z0-9_-]*$", c.Root)
-	}
-	for label, value := range map[string]string{
-		"cache": c.Cache, "cluster": c.Cluster, "timeSeries": c.TimeSeries,
-	} {
-		if !nameRE.MatchString(value) {
-			return fmt.Errorf("gns: %s %q must match ^[a-z][a-z0-9_-]*$", label, value)
-		}
-	}
-	if c.Flyway != "none" && !nameRE.MatchString(c.Flyway) {
-		return fmt.Errorf("gns: flyway %q must match ^[a-z][a-z0-9_-]*$ or be \"none\"", c.Flyway)
-	}
-	if c.CosID != "none" && !nameRE.MatchString(c.CosID) {
-		return fmt.Errorf("gns: cosid %q must match ^[a-z][a-z0-9_-]*$ or be \"none\"", c.CosID)
+// Validate checks the namespace name.
+func (n Namespace) Validate() error {
+	if !nameRE.MatchString(n.Name) {
+		return fmt.Errorf("%w: %q (want letters, digits, '.', '_' or '-')", ErrInvalidNamespace, n.Name)
 	}
 	return nil
 }
 
-// Set is a validated, derived namespace set.
-type Set struct {
-	Root       string
-	Cache      string
-	Flyway     string
-	CosID      string
-	Cluster    string
-	TimeSeries string
-}
+// String returns the namespace name.
+func (n Namespace) String() string { return n.Name }
 
-// New validates cfg and returns the derived set.
-func New(cfg Config) (Set, error) {
-	cfg = cfg.Normalize()
-	if err := cfg.Validate(); err != nil {
-		return Set{}, err
-	}
-	return Set{
-		Root:       cfg.Root,
-		Cache:      cfg.Cache,
-		Flyway:     cfg.Flyway,
-		CosID:      cfg.CosID,
-		Cluster:    cfg.Cluster,
-		TimeSeries: cfg.TimeSeries,
-	}, nil
-}
+// IsZero reports whether the namespace has no name.
+func (n Namespace) IsZero() bool { return n.Name == "" }
 
-// Default returns the default set.
-func Default() Set {
-	set, _ := New(DefaultConfig("gable"))
-	return set
-}
-
-// CacheName is the namespace passed to gcache.
-func (s Set) CacheName() string { return s.Cache }
-
-// FlywayName is the prefix of migration history tables; "none" means no
-// prefix.
-func (s Set) FlywayName() string { return s.Flyway }
-
-// FlywayTable renders the migration history table for base. "flyway: none"
-// keeps the base name verbatim (e.g. an existing Flyway table).
-func (s Set) FlywayTable(base string) string {
-	base = sanitize(base)
-	if s.Flyway == "none" {
-		return base
-	}
-	return s.Flyway + "_" + base
-}
-
-// CosIDName is the CosID allocator namespace. "cosid: none" returns the empty
-// string so an allocator keeps the logical segment names it already has.
-func (s Set) CosIDName() string {
-	if s.CosID == "none" {
-		return ""
-	}
-	return s.CosID
-}
-
-// ClusterName is the cluster/gossip namespace.
-func (s Set) ClusterName() string { return s.Cluster }
-
-// TimeSeriesName is the time-series table prefix.
-func (s Set) TimeSeriesName() string { return s.TimeSeries }
-
-// SegmentKey renders the fully-qualified CosID key (namespace + "." + logical).
-// It is not the argument to gcosid.NewSegmentGenerator when the allocator has a
-// namespace: pass the logical name there and CosIDName to the allocator.
-func (s Set) SegmentKey(logical string) string {
-	if s.CosID == "none" || logical == "" {
-		return logical
-	}
-	return s.CosID + "." + logical
-}
-
-// Table renders a time-series (or other engine-specific) table name.
-func (s Set) Table(base string) string { return s.TimeSeries + "_" + sanitize(base) }
-
-// RedisKey prefixes a logical key with the cache namespace.
-func (s Set) RedisKey(parts ...string) string {
-	clean := make([]string, 0, len(parts)+1)
-	clean = append(clean, s.Cache)
-	for _, part := range parts {
-		part = strings.Trim(part, ":")
-		if part != "" {
-			clean = append(clean, part)
+// Clone returns a copy with an independent label map.
+func (n Namespace) Clone() Namespace {
+	out := Namespace{Name: n.Name}
+	if len(n.Labels) > 0 {
+		out.Labels = make(map[string]string, len(n.Labels))
+		for k, v := range n.Labels {
+			out.Labels[k] = v
 		}
-	}
-	return strings.Join(clean, ":")
-}
-
-// Join joins non-empty parts with separator, trimming separators at the edges.
-func Join(separator string, parts ...string) string {
-	clean := make([]string, 0, len(parts))
-	for _, part := range parts {
-		part = strings.Trim(part, separator)
-		if part != "" {
-			clean = append(clean, part)
-		}
-	}
-	return strings.Join(clean, separator)
-}
-
-// Topic and Group render Kafka names using the cluster namespace.
-func (s Set) Topic(logical string) string { return s.Cluster + "." + logical }
-func (s Set) Group(logical string) string { return s.Cluster + "." + logical }
-
-// Channel renders a Redis pub/sub or internal cluster channel.
-func (s Set) Channel(logical string) string { return s.Cluster + ":" + logical }
-
-func sanitize(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	var builder strings.Builder
-	for _, char := range value {
-		switch {
-		case char >= 'a' && char <= 'z', char >= '0' && char <= '9', char == '_':
-			builder.WriteRune(char)
-		default:
-			builder.WriteByte('_')
-		}
-	}
-	out := strings.Trim(builder.String(), "_")
-	if out == "" {
-		return "default"
 	}
 	return out
+}
+
+type contextKey struct{}
+
+// With returns a child context carrying ns. A zero namespace leaves ctx
+// unchanged; callers must not use an empty namespace as a real scope.
+func With(ctx context.Context, ns Namespace) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	if ns.IsZero() {
+		return ctx
+	}
+	return context.WithValue(ctx, contextKey{}, ns.Clone())
+}
+
+// From returns the namespace carried by ctx.
+func From(ctx context.Context) (Namespace, bool) {
+	if ctx == nil {
+		return Namespace{}, false
+	}
+	ns, ok := ctx.Value(contextKey{}).(Namespace)
+	if !ok || ns.IsZero() {
+		return Namespace{}, false
+	}
+	return ns.Clone(), true
+}
+
+// MustFrom returns the namespace or panics when the context has none.
+func MustFrom(ctx context.Context) Namespace {
+	ns, ok := From(ctx)
+	if !ok {
+		panic("gns: context has no namespace")
+	}
+	return ns
+}
+
+// Store is the namespace persistence SPI. Implementations must be safe for
+// concurrent use; a Redis-backed implementation can live in a deployment or
+// framework package, so gns itself stays free of a Redis dependency.
+type Store interface {
+	// Load returns the namespace stored under name.
+	Load(ctx context.Context, name string) (Namespace, error)
+	// Save creates or replaces a namespace.
+	Save(ctx context.Context, ns Namespace) error
+	// Delete removes a namespace; deleting a missing name is not an error.
+	Delete(ctx context.Context, name string) error
+	// List returns all namespaces ordered by name.
+	List(ctx context.Context) ([]Namespace, error)
+}
+
+// MemoryStore is the in-process Store implementation. A zero value is ready to
+// use.
+type MemoryStore struct {
+	mu     sync.RWMutex
+	values map[string]Namespace
+}
+
+// NewMemoryStore returns an empty in-memory store.
+func NewMemoryStore() *MemoryStore { return &MemoryStore{} }
+
+// Load implements Store.
+func (s *MemoryStore) Load(_ context.Context, name string) (Namespace, error) {
+	if !nameRE.MatchString(name) {
+		return Namespace{}, fmt.Errorf("%w: %q", ErrInvalidNamespace, name)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	ns, ok := s.values[name]
+	if !ok {
+		return Namespace{}, fmt.Errorf("%w: %s", ErrNotFound, name)
+	}
+	return ns.Clone(), nil
+}
+
+// Save implements Store.
+func (s *MemoryStore) Save(_ context.Context, ns Namespace) error {
+	if err := ns.Validate(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.values == nil {
+		s.values = make(map[string]Namespace)
+	}
+	s.values[ns.Name] = ns.Clone()
+	return nil
+}
+
+// Delete implements Store.
+func (s *MemoryStore) Delete(_ context.Context, name string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	delete(s.values, name)
+	return nil
+}
+
+// List implements Store.
+func (s *MemoryStore) List(_ context.Context) ([]Namespace, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	out := make([]Namespace, 0, len(s.values))
+	for _, ns := range s.values {
+		out = append(out, ns.Clone())
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// Manager resolves persisted namespaces and binds them to contexts.
+type Manager struct {
+	store Store
+}
+
+// NewManager creates a manager over store.
+func NewManager(store Store) (*Manager, error) {
+	if store == nil {
+		return nil, errors.New("gns: nil store")
+	}
+	return &Manager{store: store}, nil
+}
+
+// Load resolves a namespace from the store.
+func (m *Manager) Load(ctx context.Context, name string) (Namespace, error) {
+	return m.store.Load(ctx, name)
+}
+
+// Bind resolves name and returns a context carrying it. A missing namespace is
+// an error, never a silent fallback.
+func (m *Manager) Bind(ctx context.Context, name string) (context.Context, error) {
+	ns, err := m.store.Load(ctx, name)
+	if err != nil {
+		return nil, err
+	}
+	return With(ctx, ns), nil
+}
+
+// Save persists a namespace.
+func (m *Manager) Save(ctx context.Context, ns Namespace) error {
+	return m.store.Save(ctx, ns)
 }

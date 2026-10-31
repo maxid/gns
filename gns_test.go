@@ -1,67 +1,114 @@
 package gns
 
-import "testing"
+import (
+	"context"
+	"errors"
+	"testing"
+)
 
-func TestDerivedNamespaces(t *testing.T) {
-	set, err := New(Config{Root: "app"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if set.CacheName() != "app" || set.FlywayTable("schema_migrations") != "app_schema_migrations" {
-		t.Fatalf("set = %+v", set)
-	}
-	if set.CosIDName() != "app" || set.SegmentKey("sys_dict") != "app.sys_dict" {
-		t.Fatalf("cosid = %q/%q", set.CosIDName(), set.SegmentKey("sys_dict"))
-	}
-	if set.RedisKey("user", "1") != "app:user:1" {
-		t.Fatalf("key = %q", set.RedisKey("user", "1"))
-	}
-	if set.Topic("iothub_raw") != "app.iothub_raw" || set.Group("raw") != "app.raw" {
-		t.Fatalf("topic/group = %q/%q", set.Topic("iothub_raw"), set.Group("raw"))
-	}
-	if set.Table("device") != "app_device" {
-		t.Fatalf("table = %q", set.Table("device"))
-	}
-}
-
-func TestOverridesAndNone(t *testing.T) {
-	set, err := New(Config{Root: "app", Cache: "app_cache", Flyway: "app_db", CosID: "none", Cluster: "app_cluster", TimeSeries: "app_ts"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if set.CacheName() != "app_cache" || set.FlywayTable("schema_migrations") != "app_db_schema_migrations" {
-		t.Fatalf("set = %+v", set)
-	}
-	if set.CosIDName() != "" || set.SegmentKey("sys_dict") != "sys_dict" {
-		t.Fatalf("cosid none = %q/%q", set.CosIDName(), set.SegmentKey("sys_dict"))
-	}
-	if set.ClusterName() != "app_cluster" {
-		t.Fatalf("cluster = %q", set.ClusterName())
-	}
-}
-
-func TestValidationAndJoin(t *testing.T) {
-	for _, cfg := range []Config{
-		{Root: "Bad Root"},
-		{Root: "app", Cache: "has space"},
-		{Root: "app", CosID: "bad.dot"},
-		{Root: "app", Flyway: "bad.dot"},
-	} {
-		if err := cfg.Validate(); err == nil {
-			t.Fatalf("expected error for %+v", cfg)
+func TestNamespaceValidation(t *testing.T) {
+	for _, name := range []string{"app", "app-dev", "team.alpha", "A_1"} {
+		if _, err := New(name); err != nil {
+			t.Fatalf("New(%q): %v", name, err)
 		}
 	}
-	if _, err := New(Config{Root: ""}); err != nil {
+	for _, name := range []string{"", "-bad", "has space", "a/b", string(make([]byte, 200))} {
+		if _, err := New(name); err == nil {
+			t.Fatalf("New(%q) succeeded", name)
+		}
+	}
+}
+
+func TestContextRoundTrip(t *testing.T) {
+	ns, _ := New("app-dev")
+	ns.Labels = map[string]string{"env": "dev"}
+	ctx := With(context.Background(), ns)
+	got, ok := From(ctx)
+	if !ok || got.Name != "app-dev" || got.Labels["env"] != "dev" {
+		t.Fatalf("From = %+v, %v", got, ok)
+	}
+	got.Labels["env"] = "mutated"
+	again, _ := From(ctx)
+	if again.Labels["env"] != "dev" {
+		t.Fatal("context namespace labels were not isolated")
+	}
+
+	if _, ok := From(context.Background()); ok {
+		t.Fatal("empty context returned a namespace")
+	}
+	if ctx := With(context.Background(), Namespace{}); ctx == nil {
+		t.Fatal("With returned nil")
+	}
+	defer func() {
+		if recover() == nil {
+			t.Fatal("MustFrom did not panic")
+		}
+	}()
+	_ = MustFrom(context.Background())
+}
+
+func TestMemoryStore(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	ns, _ := New("app")
+	ns.Labels = map[string]string{"owner": "team"}
+	if err := store.Save(ctx, ns); err != nil {
 		t.Fatal(err)
 	}
-	flywayNone, err := New(Config{Root: "app", Flyway: "none"})
+	got, err := store.Load(ctx, "app")
+	if err != nil || got.Labels["owner"] != "team" {
+		t.Fatalf("Load = %+v, %v", got, err)
+	}
+	got.Labels["owner"] = "changed"
+	again, _ := store.Load(ctx, "app")
+	if again.Labels["owner"] != "team" {
+		t.Fatal("store returned its internal map")
+	}
+	if _, err := store.Load(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Load missing = %v", err)
+	}
+
+	second, _ := New("other")
+	if err := store.Save(ctx, second); err != nil {
+		t.Fatal(err)
+	}
+	list, err := store.List(ctx)
+	if err != nil || len(list) != 2 || list[0].Name != "app" || list[1].Name != "other" {
+		t.Fatalf("List = %+v, %v", list, err)
+	}
+	if err := store.Delete(ctx, "app"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Load(ctx, "app"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Load after delete = %v", err)
+	}
+	if err := store.Delete(ctx, "app"); err != nil {
+		t.Fatalf("delete missing = %v", err)
+	}
+}
+
+func TestManagerBind(t *testing.T) {
+	ctx := context.Background()
+	store := NewMemoryStore()
+	ns, _ := New("app")
+	if err := store.Save(ctx, ns); err != nil {
+		t.Fatal(err)
+	}
+	mgr, err := NewManager(store)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := flywayNone.FlywayTable("flyway_schema_history"); got != "flyway_schema_history" {
-		t.Fatalf("flyway none = %q", got)
+	bound, err := mgr.Bind(ctx, "app")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if got := Join(":", "a", "", "b", "c:"); got != "a:b:c" {
-		t.Fatalf("join = %q", got)
+	if got, ok := From(bound); !ok || got.Name != "app" {
+		t.Fatalf("bound = %+v, %v", got, ok)
+	}
+	if _, err := mgr.Bind(ctx, "missing"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("Bind missing = %v", err)
+	}
+	if _, err := NewManager(nil); err == nil {
+		t.Fatal("nil store accepted")
 	}
 }
